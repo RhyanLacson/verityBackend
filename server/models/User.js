@@ -33,7 +33,7 @@ const badgeSchema = new mongoose.Schema({
     enum: ['silver', 'gold', 'expert']
   },
   voteCount: { type: Number, default: 0 },
-  truthScore: { type: Number, default: 50 },
+  truthScore: { type: Number, default: 0 },
   nftTokenId: String,
   mintedAt: Date,
   tokenId: String,
@@ -74,8 +74,7 @@ const userSchema = new mongoose.Schema({
   province: String,
   country: String,
   status: {type: String, default: 'pending'},
-  categories: [categorySchema],  // ✅ now stores structured category objects
-  badges: [badgeSchema],
+  categories: [categorySchema],
   roleBadges: [roleBadgeSchema],
   roles: [{
     type: String,

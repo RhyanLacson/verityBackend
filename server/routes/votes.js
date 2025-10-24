@@ -32,35 +32,74 @@ router.get('/user/:walletAddress', async (req, res) => {
 });
 
 // @route   POST /api/votes
-// @desc    Create new vote
+// @desc    Save a new vote to the votes collection
 // @access  Public
 router.post('/', async (req, res) => {
   try {
-    const voteData = req.body;
-    
-    // Check if user already voted on this claim
-    const existingVote = await Vote.findOne({
-      claimId: voteData.claimId,
-      voter: voteData.voter.toLowerCase()
-    });
+    const {
+      claimId,
+      voter,          // wallet address (frontend sends this)
+      position,       // 'truth' | 'fake' (frontend sends this)
+      stake,
+      badgeTier,
+      categoryBadge,
+      truthScoreAtVote,
+      evidence,
+      evidenceQualityScore,
+      weightTruthScore,
+      weight,
+      metadata
+    } = req.body;
 
-    if (existingVote) {
+    // ✅ Validation
+    if (!claimId || !voter || !position || stake == null) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    // ✅ Prevent duplicate vote from same wallet for same claim
+    const existing = await Vote.findOne({
+      claimId,
+      voter: voter.toLowerCase(),
+    });
+    if (existing) {
       return res.status(400).json({ error: 'User already voted on this claim' });
     }
 
-    const vote = new Vote({
-      ...voteData,
-      voter: voteData.voter.toLowerCase()
+    // ✅ Create vote record
+    const newVote = new Vote({
+      claimId,
+      voter: voter.toLowerCase(),
+      voterAddress: voter.toLowerCase(),
+      position,
+      stake,
+      badgeTier,
+      categoryBadge,
+      roleBadges: metadata?.roleBadges || [],
+      truthScoreAtVote,
+      evidence: Array.isArray(evidence)
+        ? evidence.map((e) => (typeof e === 'string' ? { url: e } : e))
+        : [],
+      evidenceQualityScore,
+      weight: weight || weightTruthScore || 1.0,
+      blockchainTxHash: metadata?.txHash,
+      voterCity: metadata?.voterCity,
+      voterProvince: metadata?.voterProvince,
+      voterCountry: metadata?.voterCountry
     });
-    
-    await vote.save();
 
-    res.status(201).json(vote);
+    const savedVote = await newVote.save();
+
+    res.status(201).json({
+      message: 'Vote successfully saved',
+      vote: savedVote
+    });
   } catch (error) {
-    console.error('Error creating vote:', error);
-    res.status(500).json({ error: 'Server error' });
+    console.error('❌ Error creating vote:', error);
+    res.status(500).json({ error: 'Server error', details: error.message });
   }
 });
+
+
 
 // @route   PUT /api/votes/:claimId/:voter
 // @desc    Update vote (for rewards)
