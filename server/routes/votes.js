@@ -36,68 +36,129 @@ router.get('/user/:walletAddress', async (req, res) => {
 // @access  Public
 router.post('/', async (req, res) => {
   try {
-    const {
-      claimId,
-      voter,          // wallet address (frontend sends this)
-      position,       // 'truth' | 'fake' (frontend sends this)
-      stake,
-      badgeTier,
-      categoryBadge,
-      truthScoreAtVote,
-      evidence,
-      evidenceQualityScore,
-      weightTruthScore,
-      weight,
-      metadata
-    } = req.body;
+    const body = req.body || {};
 
-    // ✅ Validation
-    if (!claimId || !voter || !position || stake == null) {
-      return res.status(400).json({ error: 'Missing required fields' });
+
+    // Accept either position or isTrue from FE
+    let position = body.position;
+    if (!position && typeof body.isTrue === 'boolean') {
+      position = body.isTrue ? 'truth' : 'fake';
     }
 
-    // ✅ Prevent duplicate vote from same wallet for same claim
-    const existing = await Vote.findOne({
-      claimId,
-      voter: voter.toLowerCase(),
-    });
+
+    // Normalize wallet
+    const voterAddress = (body.voterAddress || '').toLowerCase();
+
+
+    // Required fields that FE sends after on-chain confirm
+    const required = {
+      claimId: body.claimId,
+      voter: body.voter,                      // displayName
+      voterAddress,
+      position,
+      stake: body.stake,                      // number (ETH)
+      weight: body.weight,                    // number (normalized)
+      stakeWei: body.stakeWei,                // string
+      weightWei: body.weightWei,              // string
+      txHash: body.txHash,                    // string
+      chainId: body.chainId,                  // number
+      blockNumber: body.blockNumber,          // number
+      evidence: body.evidence,                // string[]
+    };
+
+
+    const missing = Object.entries(required)
+      .filter(([_, v]) =>
+        v === undefined || v === null ||
+        (typeof v === 'string' && v.trim() === '') ||
+        (Array.isArray(v) && v.length === 0)
+      )
+      .map(([k]) => k);
+
+
+    if (missing.length) {
+      return res.status(400).json({ error: `Missing required fields: ${missing.join(', ')}` });
+    }
+
+
+    // Enforce position enum
+    if (!['truth', 'fake'].includes(position)) {
+      return res.status(400).json({ error: 'Invalid position; expected "truth" or "fake"' });
+    }
+
+
+    // Prevent duplicate vote
+    const existing = await Vote.findOne({ claimId: body.claimId, voterAddress });
     if (existing) {
       return res.status(400).json({ error: 'User already voted on this claim' });
     }
 
-    // ✅ Create vote record
-    const newVote = new Vote({
-      claimId,
-      voter: voter.toLowerCase(),
-      voterAddress: voter.toLowerCase(),
+
+    // Build document exactly as FE expects to see it later
+    const doc = {
+      claimId: String(body.claimId),
+
+
+      voter: body.voter,
+      voterAddress,
+
+
       position,
-      stake,
-      badgeTier,
-      categoryBadge,
-      roleBadges: metadata?.roleBadges || [],
-      truthScoreAtVote,
-      evidence: Array.isArray(evidence)
-        ? evidence.map((e) => (typeof e === 'string' ? { url: e } : e))
-        : [],
-      evidenceQualityScore,
-      weight: weight || weightTruthScore || 1.0,
-      blockchainTxHash: metadata?.txHash,
-      voterCity: metadata?.voterCity,
-      voterProvince: metadata?.voterProvince,
-      voterCountry: metadata?.voterCountry
-    });
 
-    const savedVote = await newVote.save();
 
-    res.status(201).json({
-      message: 'Vote successfully saved',
-      vote: savedVote
-    });
-  } catch (error) {
-    console.error('❌ Error creating vote:', error);
-    res.status(500).json({ error: 'Server error', details: error.message });
+      stake: Number(body.stake),
+      weight: Number(body.weight),
+      stakeWei: String(body.stakeWei),
+      weightWei: String(body.weightWei),
+
+
+      // evidence comes as string[]
+      evidence: Array.isArray(body.evidence) ? body.evidence : [],
+
+
+      evidenceQualityScore: body.evidenceQualityScore ?? 1.0,
+      weightTruthScore: body.weightTruthScore ?? 1.0,
+
+
+      badgeTier: body.badgeTier ?? '',
+      categoryBadge: body.categoryBadge ?? '',
+      truthScoreAtVote: body.truthScoreAtVote ?? 0,
+      roleBadges: Array.isArray(body.roleBadges) ? body.roleBadges : [],
+
+
+      voterCity: body.voterCity,
+      voterProvince: body.voterProvince,
+      voterCountry: body.voterCountry,
+
+
+      txHash: body.txHash,
+      blockchainTxHash: body.blockchainTxHash || body.txHash,
+      blockNumber: Number(body.blockNumber),
+      chainId: Number(body.chainId),
+
+
+      reward: Number(body.reward ?? 0),
+      rewardWei: body.rewardWei ?? '0',
+      rewarded: Boolean(body.rewarded ?? false),
+
+
+      timestamp: body.timestamp ?? Math.floor(Date.now() / 1000),
+      votedAt: body.votedAt ? new Date(body.votedAt) : new Date(),
+
+
+      status: body.status || 'onchain',
+    };
+
+
+    const saved = await new Vote(doc).save();
+    return res.status(201).json({ message: 'Vote successfully saved', vote: saved });
+  } catch (err) {
+    console.error('❌ Vote save error:', err);
+    return res.status(500).json({ error: err.message || 'Internal Server Error' });
   }
 });
+
+
 
 
 

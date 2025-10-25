@@ -74,6 +74,7 @@ const userSchema = new mongoose.Schema({
   province: String,
   country: String,
   status: {type: String, default: 'pending'},
+  badges: [badgeSchema],
   categories: [categorySchema],
   roleBadges: [roleBadgeSchema],
   roles: [{
