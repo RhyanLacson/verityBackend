@@ -15,14 +15,55 @@ const EvidenceSchema = new mongoose.Schema(
 
 const VoterScopeSchema = new mongoose.Schema(
   {
-    everyone: { type: Boolean, default: true },        // FE often uses “everyone”
-    requireCategory: { type: Boolean, default: false },// FE default false
+    everyone: { type: Boolean, default: true },
+    requireCategory: { type: Boolean, default: false },
     allowedRoles: { type: [String], default: [] },
     allowedGeo: {
       countries: { type: [String], default: [] },
       provinces: { type: [String], default: [] },
       cities: { type: [String], default: [] },
     },
+  },
+  { _id: false }
+);
+
+/* ---------- Payout / Totals / Verdict ---------- */
+const SideTotalsSchema = new mongoose.Schema(
+  {
+    votes: { type: Number, default: 0 },
+    stakeEth: { type: Number, default: 0 },
+    weight: { type: Number, default: 0 }, // float sum (keep BigInt sum separately if needed)
+  },
+  { _id: false }
+);
+
+const TotalsSchema = new mongoose.Schema(
+  {
+    truth: { type: SideTotalsSchema, default: () => ({}) },
+    fake:  { type: SideTotalsSchema, default: () => ({}) },
+    // Optional exact sums if you also aggregate BigInt on finalize:
+    sumWeightWeiTruth: { type: String, default: '0' }, // BigInt as string
+    sumWeightWeiFake:  { type: String, default: '0' }, // BigInt as string
+  },
+  { _id: false }
+);
+
+const FinalVerdictSchema = new mongoose.Schema(
+  {
+    side: { type: String, enum: ['truth', 'fake'], index: true },
+    score: Number,              // from aiVerification.finalScore or blended
+    reason: String,
+    sources: [String],
+  },
+  { _id: false }
+);
+
+const PayoutSchema = new mongoose.Schema(
+  {
+    status: { type: String, enum: ['pending', 'settled', 'skipped'], default: 'pending', index: true },
+    poolEth: { type: Number, default: 0 },        // losing pool in ETH (mirror)
+    perWeightWei: { type: String, default: '0' }, // share per unit of weight in wei (BigInt string)
+    txHash: String,                                // on-chain settle tx (if any)
   },
   { _id: false }
 );
@@ -63,13 +104,13 @@ const ClaimSchema = new mongoose.Schema(
     status: {
       type: String,
       enum: [
-        'pending',  // before it enters voting
+        'pending',   // before it enters voting
         'voting',
-        'ended',    // FE sets when time is up
-        'verified', // after AI/resolve
-        'flagged',  // moderation
-        'resolving',
-        'resolved',
+        'ended',     // time is up (pre-verify)
+        'verified',  // after AI verifies but before payout
+        'flagged',   // moderation
+        'resolving', // in settlement
+        'resolved',  // finalized with payout
       ],
       default: 'pending',
       index: true,
@@ -84,7 +125,7 @@ const ClaimSchema = new mongoose.Schema(
     chainId: Number,
     blockNumber: Number,
 
-    /* ---- Final resolution (on-chain or computed) ---- */
+    /* ---- Final resolution (legacy block, keep for compatibility) ---- */
     resolution: {
       outcome: { type: String, enum: ['truth', 'fake', 'unresolved'] },
       aiVerdict: String,
@@ -100,7 +141,7 @@ const ClaimSchema = new mongoose.Schema(
       totalEligibleVoters: Number,
     },
 
-    /* ---- AI verification (what your BE route writes) ---- */
+    /* ---- AI verification (your BE route writes this) ---- */
     aiVerification: {
       result: { type: String, default: 'Uncertain' },   // "Truth" | "Fake" | "Uncertain"
       finalScore: { type: Number, default: 0 },         // 0..100
@@ -119,9 +160,15 @@ const ClaimSchema = new mongoose.Schema(
         llmNotes: [String],
       },
       sources: [String],
-      verifiedAt: { type: Date, default: Date.now },
+      verifiedAt: { type: Date },
       modelUsed: String,                                // e.g., "gemini-2.5-flash"
     },
+
+    /* ---- New: aggregation + verdict + payout (for finalize step) ---- */
+    totals: { type: TotalsSchema, default: () => ({}) },
+    finalVerdict: { type: FinalVerdictSchema, default: undefined },
+    payout: { type: PayoutSchema, default: () => ({}) },
+    finalizedAt: { type: Date },
   },
   {
     timestamps: true,
@@ -131,6 +178,18 @@ const ClaimSchema = new mongoose.Schema(
 
 /* ---------- Indexes ---------- */
 ClaimSchema.index({ claimId: 1 }, { unique: true });
-// category, poster, status already indexed above via field options
+// Helpful for queries on lifecycle:
+ClaimSchema.index({ status: 1, votingEndsAt: 1 });
+ClaimSchema.index({ 'finalVerdict.side': 1 });
+
+/* ---------- Hooks / Utilities ---------- */
+// Auto-compute votingEndsAt if not set (based on postedAt + duration)
+ClaimSchema.pre('save', function(next) {
+  if (!this.votingEndsAt && this.postedAt && this.votingDurationSec) {
+    this.votingEndsAt = new Date(this.postedAt.getTime() + this.votingDurationSec * 1000);
+  }
+  next();
+});
 
 module.exports = mongoose.model('Claim', ClaimSchema);
+

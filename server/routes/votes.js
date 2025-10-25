@@ -39,41 +39,54 @@ router.post('/', async (req, res) => {
     const body = req.body || {};
 
 
-    // Accept either position or isTrue from FE
+    // -------- derive/normalize --------
+    // position: allow 'position' or boolean 'isTrue'
     let position = body.position;
     if (!position && typeof body.isTrue === 'boolean') {
       position = body.isTrue ? 'truth' : 'fake';
     }
 
 
-    // Normalize wallet
-    const voterAddress = (body.voterAddress || '').toLowerCase();
+    // voterAddress: accept either voterAddress or (legacy) voter if it looks like a wallet
+    const rawWallet = (body.voterAddress || body.voter || '').toString();
+    const isEth = /^0x[a-fA-F0-9]{40}$/.test(rawWallet);
+    const voterAddress = isEth ? rawWallet.toLowerCase() : String(body.voterAddress || '').toLowerCase();
 
 
-    // Required fields that FE sends after on-chain confirm
+    // optional display name
+    const voterDisplayName = !isEth && body.voter ? String(body.voter) : (body.voterName || '');
+
+
+    // coerce numbers
+    const stake = Number(body.stake);
+    const weight = Number(body.weight);
+    const chainId = Number(body.chainId);
+    const blockNumber = Number(body.blockNumber);
+
+
+    // -------- required fields check --------
     const required = {
       claimId: body.claimId,
-      voter: body.voter,                      // displayName
       voterAddress,
       position,
-      stake: body.stake,                      // number (ETH)
-      weight: body.weight,                    // number (normalized)
-      stakeWei: body.stakeWei,                // string
-      weightWei: body.weightWei,              // string
-      txHash: body.txHash,                    // string
-      chainId: body.chainId,                  // number
-      blockNumber: body.blockNumber,          // number
-      evidence: body.evidence,                // string[]
+      stake,
+      weight,
+      stakeWei: body.stakeWei,
+      weightWei: body.weightWei,
+      txHash: body.txHash,
+      chainId,
+      blockNumber,
+      evidence: body.evidence,
     };
 
 
-    const missing = Object.entries(required)
-      .filter(([_, v]) =>
-        v === undefined || v === null ||
-        (typeof v === 'string' && v.trim() === '') ||
-        (Array.isArray(v) && v.length === 0)
-      )
-      .map(([k]) => k);
+    const missing = Object.entries(required).filter(([k, v]) => {
+      if (v === undefined || v === null) return true;
+      if (typeof v === 'string' && v.trim() === '') return true;
+      if (Array.isArray(v) && v.length === 0) return true;
+      if ((k === 'stake' || k === 'weight' || k === 'chainId' || k === 'blockNumber') && Number.isNaN(v)) return true;
+      return false;
+    }).map(([k]) => k);
 
 
     if (missing.length) {
@@ -81,82 +94,78 @@ router.post('/', async (req, res) => {
     }
 
 
-    // Enforce position enum
     if (!['truth', 'fake'].includes(position)) {
       return res.status(400).json({ error: 'Invalid position; expected "truth" or "fake"' });
     }
 
 
-    // Prevent duplicate vote
-    const existing = await Vote.findOne({ claimId: body.claimId, voterAddress });
+    if (!/^0x[a-f0-9]{40}$/.test(voterAddress)) {
+      return res.status(400).json({ error: 'Invalid voterAddress' });
+    }
+
+
+    // -------- duplicate protection (fast path) --------
+    const claimId = String(body.claimId);
+    const existing = await Vote.findOne({ claimId, voterAddress }).lean();
     if (existing) {
       return res.status(400).json({ error: 'User already voted on this claim' });
     }
 
 
-    // Build document exactly as FE expects to see it later
+    // -------- build doc --------
     const doc = {
-      claimId: String(body.claimId),
-
-
-      voter: body.voter,
+      claimId,
+      voter: voterDisplayName || body.voter || '',  // optional
       voterAddress,
-
-
       position,
-
-
-      stake: Number(body.stake),
-      weight: Number(body.weight),
+      stake,
+      weight,
       stakeWei: String(body.stakeWei),
       weightWei: String(body.weightWei),
-
-
-      // evidence comes as string[]
       evidence: Array.isArray(body.evidence) ? body.evidence : [],
-
-
-      evidenceQualityScore: body.evidenceQualityScore ?? 1.0,
-      weightTruthScore: body.weightTruthScore ?? 1.0,
-
-
+      evidenceQualityScore: typeof body.evidenceQualityScore === 'number' ? body.evidenceQualityScore : 1.0,
+      weightTruthScore: typeof body.weightTruthScore === 'number' ? body.weightTruthScore : 1.0,
       badgeTier: body.badgeTier ?? '',
       categoryBadge: body.categoryBadge ?? '',
-      truthScoreAtVote: body.truthScoreAtVote ?? 0,
+      truthScoreAtVote: Number(body.truthScoreAtVote ?? 0),
       roleBadges: Array.isArray(body.roleBadges) ? body.roleBadges : [],
-
-
       voterCity: body.voterCity,
       voterProvince: body.voterProvince,
       voterCountry: body.voterCountry,
-
-
-      txHash: body.txHash,
-      blockchainTxHash: body.blockchainTxHash || body.txHash,
-      blockNumber: Number(body.blockNumber),
-      chainId: Number(body.chainId),
-
-
+      txHash: String(body.txHash),
+      blockchainTxHash: body.blockchainTxHash || String(body.txHash),
+      blockNumber,
+      chainId,
+      // back-compat reward mirrors (optional)
       reward: Number(body.reward ?? 0),
-      rewardWei: body.rewardWei ?? '0',
+      rewardWei: String(body.rewardWei ?? '0'),
       rewarded: Boolean(body.rewarded ?? false),
-
-
-      timestamp: body.timestamp ?? Math.floor(Date.now() / 1000),
+      timestamp: Number(body.timestamp ?? Math.floor(Date.now() / 1000)),
       votedAt: body.votedAt ? new Date(body.votedAt) : new Date(),
-
-
       status: body.status || 'onchain',
     };
 
 
-    const saved = await new Vote(doc).save();
-    return res.status(201).json({ message: 'Vote successfully saved', vote: saved });
+    // -------- write --------
+    const saved = await Vote.create(doc);
+
+
+    // Clean response
+    const json = saved.toJSON();
+    return res.status(201).json({
+      message: 'Vote successfully saved',
+      vote: json, // has id (via toJSON transform if you added it), no __v
+    });
   } catch (err) {
+    // handle unique index race gracefully
+    if (err?.code === 11000) {
+      return res.status(400).json({ error: 'User already voted on this claim' });
+    }
     console.error('❌ Vote save error:', err);
     return res.status(500).json({ error: err.message || 'Internal Server Error' });
   }
 });
+
 
 
 
