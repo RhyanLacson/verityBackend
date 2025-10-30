@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const Vote = require('../models/Vote');
-
+const Claim = require('../models/Claims');
 // @route   GET /api/votes/:claimId
 // @desc    Get all votes for a claim
 // @access  Public
@@ -21,7 +21,7 @@ router.get('/:claimId', async (req, res) => {
 router.get('/user/:walletAddress', async (req, res) => {
   try {
     const votes = await Vote.find({ 
-      voter: req.params.walletAddress.toLowerCase() 
+      voterAddress: req.params.walletAddress.toLowerCase() 
     }).sort({ votedAt: -1 });
     
     res.json(votes);
@@ -150,8 +150,58 @@ router.post('/', async (req, res) => {
     const saved = await Vote.create(doc);
 
 
+    // --- Recompute claim.totals immediately after a successful vote ---
+    try {
+      const votes = await Vote.find(
+        { claimId: String(doc.claimId) },
+        { position: 1, stake: 1, weight: 1, weightWei: 1 }
+      ).lean();
+
+
+      const acc = {
+        truth: { votes: 0, stakeEth: 0, weight: 0, sumWeightWei: 0n },
+        fake:  { votes: 0, stakeEth: 0, weight: 0, sumWeightWei: 0n },
+      };
+
+
+      for (const v of votes) {
+        const side = v.position === 'truth' ? 'truth' : 'fake';
+        acc[side].votes += 1;
+        acc[side].stakeEth += Number(v.stake || 0);
+        acc[side].weight   += Number(v.weight || 0);
+        acc[side].sumWeightWei += BigInt(String(v.weightWei || '0'));
+      }
+
+
+      await Claim.findOneAndUpdate(
+        { claimId: String(doc.claimId) },
+        {
+          $set: {
+            'totals.truth.votes': acc.truth.votes,
+            'totals.truth.stakeEth': acc.truth.stakeEth,
+            'totals.truth.weight': acc.truth.weight,
+            'totals.sumWeightWeiTruth': acc.truth.sumWeightWei.toString(),
+
+
+            'totals.fake.votes': acc.fake.votes,
+            'totals.fake.stakeEth': acc.fake.stakeEth,
+            'totals.fake.weight': acc.fake.weight,
+            'totals.sumWeightWeiFake': acc.fake.sumWeightWei.toString(),
+
+
+            // keep payout pending during voting
+            'payout.status': 'pending',
+          },
+        },
+        { new: false }
+      );
+    } catch (aggErr) {
+      console.error('[vote] totals aggregation failed:', aggErr);
+    }
+
+
     // Clean response
-    const json = saved.toJSON();
+    const json = saved.toJSON?.() ?? saved;
     return res.status(201).json({
       message: 'Vote successfully saved',
       vote: json, // has id (via toJSON transform if you added it), no __v
@@ -165,10 +215,6 @@ router.post('/', async (req, res) => {
     return res.status(500).json({ error: err.message || 'Internal Server Error' });
   }
 });
-
-
-
-
 
 
 // @route   PUT /api/votes/:claimId/:voter

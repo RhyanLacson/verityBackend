@@ -31,6 +31,7 @@ app.use('/api/users', userRoutes);
 app.use('/api/claims', claimRoutes);
 app.use('/api/votes', voteRoutes);
 app.use('/api/badges', badgeRoutes);
+app.use('/api/claims', require('./routes/claims-settle'));
 
 // Health check
 app.get('/api/health', (req, res) => {
